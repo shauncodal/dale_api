@@ -1,0 +1,207 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isSystem    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  permissions RolePermission[]
+  adminUsers  AdminUser[]
+}
+
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  description String?
+  roles       RolePermission[]
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model AdminUser {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  passwordHash       String
+  roleId             String?
+  role               Role?     @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  tenantId           String?
+  tenant             Tenant?   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mustChangePassword Boolean   @default(false)
+  passwordChangedAt  DateTime?
+  termsConsentAt     DateTime?
+  termsConsentVersion String?
+  createdAt          DateTime  @default(now())
+}
+
+model Tenant {
+  id                            String         @id @default(cuid())
+  name                          String
+  domain                        String
+  contactEmail                  String
+  plan                          String
+  status                        String
+  minutesQuotaPerUserPerMonth   Int             @default(60)
+  pricePerUserPerMonthDollars   Decimal?        @db.Decimal(10, 2)
+  pricePer30MinDollars          Decimal?       @db.Decimal(10, 2)
+  /// Monthly minute pool for Custom plan (resets each calendar month in product logic). Increased per invoice by that line's per-month minutes (users × minutesPerMonthPerUser), not by invoice minutesTotal.
+  minutesPurchased              Int            @default(0)
+  createdAt                     DateTime       @default(now())
+  updatedAt                     DateTime       @updatedAt
+  users                         User[]
+  groups                        Group[]
+  adminUsers                    AdminUser[]
+  invoices                      TenantInvoice[]
+}
+
+model TenantInvoice {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users                   Int
+  months                  Int
+  minutesPerMonthPerUser  Int
+  pricePerMonthPerUser    Decimal  @db.Decimal(10, 2)
+  minutesTotal            Int
+  amountDollars           Decimal  @db.Decimal(10, 2)
+  createdAt               DateTime @default(now())
+
+  @@index([tenantId])
+}
+
+model PlatformSettings {
+  id                         String   @id @default(cuid())
+  costPer30MinAvatarDollars  Decimal  @db.Decimal(10, 2) @default(0)
+  infrastructureCostDollars  Decimal  @db.Decimal(10, 2) @default(0)
+  costPerMinuteDollars       Decimal? @db.Decimal(10, 4)
+  updatedAt                  DateTime @updatedAt
+}
+
+model Group {
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  title         String
+  description  String?        @db.Text
+  users         User[]        @relation("UserGroup")
+  groupAvatars  GroupAvatar[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([tenantId])
+}
+
+model User {
+  id                String    @id @default(cuid())
+  tenantId          String
+  tenant            Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  groupId           String
+  group             Group     @relation("UserGroup", fields: [groupId], references: [id], onDelete: Cascade)
+  name              String
+  email             String
+  role              String
+  status            String
+  passwordHash      String?
+  mustChangePassword Boolean  @default(false)
+  termsConsentAt    DateTime?
+  termsConsentVersion String?
+  minutesQuotaTotal Int?      @default(60)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  sessions          Session[]
+
+  @@unique([tenantId, email])
+  @@unique([groupId, email])
+  @@index([tenantId])
+  @@index([groupId])
+}
+
+model Session {
+  id              String     @id @default(cuid())
+  userId          String
+  user            User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  coachId         String
+  sessionName     String
+  durationMinutes Int
+  durationSeconds Int?
+  score           Int?
+  notes           String?
+  createdAt       DateTime   @default(now())
+  deletedAt       DateTime?
+  recording       Recording?
+
+  @@index([userId])
+  @@index([createdAt])
+}
+
+model Recording {
+  id                   String   @id @default(cuid())
+  sessionId            String   @unique
+  session              Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  userId               String
+  tenantId             String
+  coachId              String
+  s3Key                String
+  s3Bucket             String
+  durationSeconds      Int
+  avatarResponseScore  Int?
+  userEngagementScore  Int?
+  createdAt            DateTime @default(now())
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([coachId])
+}
+
+model CoachingAvatar {
+  id            String         @id @default(cuid())
+  name          String
+  title         String
+  speciality    String?
+  description   String?
+  style         String?
+  rating        Float          @default(0)
+  sessions      Int            @default(0)
+  img           String?
+  tags         Json?           // string[]
+  creditRate    Int            @default(1)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  liveConfig   LiveAvatarConfig?
+  groupAvatars GroupAvatar[]
+}
+
+model GroupAvatar {
+  groupId   String         @db.VarChar(191)
+  avatarId  String         @db.VarChar(191)
+  group     Group          @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  avatar    CoachingAvatar @relation(fields: [avatarId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now())
+
+  @@id([groupId, avatarId])
+}
+
+model LiveAvatarConfig {
+  id        String   @id @default(cuid())
+  coachId   String   @unique
+  coach     CoachingAvatar @relation(fields: [coachId], references: [id], onDelete: Cascade)
+  avatarId  String
+  contextId String?
+  voiceId   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

@@ -1,0 +1,75 @@
+# CodeBuild buildspec for dale_api - builds and deploys to EC2
+version: 0.2
+
+phases:
+  pre_build:
+    commands:
+      - echo "Installing dependencies..."
+      - cd dale_api
+      - npm ci
+      - npx prisma generate
+  build:
+    commands:
+      - echo "Building dale_api..."
+      - npm run build
+      - tar czf dale-api.tar.gz dist package.json package-lock.json prisma
+  post_build:
+    commands:
+      - echo "Deploying to EC2..."
+      - |
+        SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id dale/dev/secrets --query SecretString --output text --region $AWS_REGION)
+        DOMAIN_BASE=$(aws ssm get-parameter --name /dale/dev/DOMAIN_BASE --query Parameter.Value --output text --region $AWS_REGION 2>/dev/null || echo "dev.dineonext.io")
+        RDS_ENDPOINT=$(aws ssm get-parameter --name /dale/dev/RDS_ENDPOINT --query Parameter.Value --output text --region $AWS_REGION 2>/dev/null)
+        DATABASE_URL=$(echo $SECRET_JSON | jq -r .DATABASE_URL)
+        JWT_SECRET=$(echo $SECRET_JSON | jq -r .JWT_SECRET)
+        LIVEAVATAR_API_KEY=$(echo $SECRET_JSON | jq -r .LIVEAVATAR_API_KEY)
+        LITE_ADMIN_EMAIL=$(echo $SECRET_JSON | jq -r .LITE_ADMIN_EMAIL)
+        LITE_ADMIN_PASSWORD=$(echo $SECRET_JSON | jq -r .LITE_ADMIN_PASSWORD)
+        MAILERSEND_API_KEY=$(echo $SECRET_JSON | jq -r '.MAILERSEND_API_KEY // empty')
+        MAIL_FROM=$(echo $SECRET_JSON | jq -r '.MAIL_FROM // empty')
+        MAIL_FROM_NAME=$(echo $SECRET_JSON | jq -r '.MAIL_FROM_NAME // empty')
+        ENV_CONTENT="DATABASE_URL=$DATABASE_URL
+JWT_SECRET=$JWT_SECRET
+LIVEAVATAR_API_KEY=$LIVEAVATAR_API_KEY
+LITE_ADMIN_EMAIL=$LITE_ADMIN_EMAIL
+LITE_ADMIN_PASSWORD=$LITE_ADMIN_PASSWORD
+MAILERSEND_API_KEY=$MAILERSEND_API_KEY
+MAIL_FROM=$MAIL_FROM
+MAIL_FROM_NAME=$MAIL_FROM_NAME
+PORT=3002
+NODE_ENV=production
+CORS_ORIGINS=https://${DOMAIN_BASE},https://app.${DOMAIN_BASE}
+CORS_ORIGIN=https://${DOMAIN_BASE}
+APP_URL=https://${DOMAIN_BASE}
+UPLOAD_DIR=/opt/dale-api/uploads"
+        echo "$ENV_CONTENT" | aws s3 cp - s3://$BUCKET_API/.env --region $AWS_REGION
+      - aws s3 cp dale-api.tar.gz s3://$BUCKET_API/ --region $AWS_REGION
+      - |
+        SVC_B64=$(echo -n '[Unit]
+        Description=Dale API
+        After=network.target
+
+        [Service]
+        Type=simple
+        User=root
+        WorkingDirectory=/opt/dale-api
+        ExecStart=/usr/bin/node dist/index.js
+        Restart=always
+        RestartSec=5
+        Environment=NODE_ENV=production
+        EnvironmentFile=-/opt/dale-api/.env
+
+        [Install]
+        WantedBy=multi-user.target' | base64)
+        aws ssm send-command --instance-ids $INSTANCE_ID --document-name "AWS-RunShellScript" \
+          --parameters "commands=[\"cd /opt/dale-api && aws s3 cp s3://$BUCKET_API/dale-api.tar.gz . && aws s3 cp s3://$BUCKET_API/.env .env && tar xzf dale-api.tar.gz && rm -f dale-api.tar.gz && npm ci --production\",\"echo $SVC_B64 | base64 -d > /etc/systemd/system/dale-api.service\",\"systemctl daemon-reload\",\"systemctl enable dale-api\",\"systemctl restart dale-api\"]" \
+          --region $AWS_REGION --output text --query "Command.CommandId"
+      - echo "Deploy complete"
+
+artifacts:
+  files:
+    - dale_api/dale-api.tar.gz
+
+cache:
+  paths:
+    - dale_api/node_modules/**/*
